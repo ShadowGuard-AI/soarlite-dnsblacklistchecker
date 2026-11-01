@@ -42,6 +42,7 @@ async def check_dnsbl(target, dnsbl_server, resolver):
     """
     try:
         # Construct the query string
+        # The query is plain string joining, so the reversal for an IP has to happen before this point, in main. Pass a domain and an IP through the same path and they are treated identically here, which is why the two argument branches in main diverge before they converge.
         query = target + "." + dnsbl_server
         # Perform the DNS query
         answers = await resolver.resolve(query, "A")  # Await the result
@@ -52,6 +53,7 @@ async def check_dnsbl(target, dnsbl_server, resolver):
         else:
             logging.debug(f"Target {target} not listed on {dnsbl_server}")
             return dnsbl_server, False
+    # For a blacklist, no such name is the good answer, not an error. I map it to False rather than None because the server did answer, and reserving None for cases where nothing was learned keeps the summary honest.
     except dns.resolver.NXDOMAIN:
         logging.debug(f"Target {target} not listed on {dnsbl_server} (NXDOMAIN)")
         return dnsbl_server, False  # Not listed
@@ -87,6 +89,7 @@ async def check_target_parallel(target, dnsbl_servers):
     results = {}
     resolver = dns.asyncresolver.Resolver()  # Create an async resolver instance
     resolver.timeout = 5  # Set timeout to 5 seconds
+    # One resolver is shared by every check in the batch. A slow server does not get its own budget, and a resolver setting changed for one query would change them all, so the timeout is set once here and left alone.
 
     # Use asyncio.gather to run the checks concurrently
     tasks = [check_dnsbl(target, server, resolver) for server in dnsbl_servers]
@@ -115,6 +118,7 @@ def is_valid_domain(domain):
         labels = domain.split(".")
         if len(labels) < 2:
             return False
+        # An all numeric name is rejected as a domain even though the label rules below would pass it. That keeps a malformed IP like 999.1.2.3 from being checked as a domain name and queried in the wrong form.
         if all(label.isdigit() for label in labels):
             return False
         for label in labels:
@@ -146,6 +150,7 @@ def is_valid_ip(ip):
         for part in parts:
             if not part.isdigit() or part == "":
                 return False
+            # Leading zeroes are refused rather than cleaned up. Different resolvers read 010 as ten or as octal eight, and I would rather reject the input than guess which address the caller meant.
             if len(part) > 1 and part.startswith("0"):
                 return False
             num = int(part)
@@ -213,6 +218,7 @@ def main():
         # Reverse the IP address for DNSBL queries. The reversed form is
         # the query form only and appears only in verbose logs.
         parts = args.ip.split(".")
+        # Only the IP form is reversed. The domain form goes in as written, because domain based lists expect the name itself, and reversing a domain would query a name nobody published an answer for.
         target = ".".join(reversed(parts))
         if args.verbose:
             logging.debug(f"Reversed query form for {original_target}: {target}")
@@ -238,6 +244,7 @@ def main():
                 unknown_count += 1
                 print(f"  {server}: UNKNOWN (Error or Timeout)")
         print(f"Summary: {listed_count} listed, {not_listed_count} not listed, {unknown_count} unknown.")
+        # If every server came back unknown, the printed summary alone would look like a completed check. This exit is what separates a run that learned nothing from a run that learned the target is clean everywhere.
         if listed_count + not_listed_count == 0:
             logging.error("No DNSBL server produced a definitive answer.")
             sys.exit(1)
