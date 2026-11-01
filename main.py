@@ -2,8 +2,11 @@
 
 import argparse
 import asyncio
+import dns.asyncresolver
+import dns.exception
 import dns.resolver
 import logging
+import re
 import sys
 import concurrent.futures  # For parallel execution
 from datetime import datetime
@@ -31,7 +34,7 @@ async def check_dnsbl(target, dnsbl_server, resolver):
     Args:
         target (str): The target domain or IP address to check.
         dnsbl_server (str): The DNSBL server to query.
-        resolver (dns.resolver.Resolver):  A pre-configured DNS resolver object.
+        resolver (dns.asyncresolver.Resolver):  A pre-configured async DNS resolver object.
 
     Returns:
         tuple: A tuple containing the DNSBL server and a boolean indicating if the target is listed.
@@ -82,7 +85,7 @@ async def check_target_parallel(target, dnsbl_servers):
               the query resulted in an error (None).
     """
     results = {}
-    resolver = dns.resolver.Resolver()  # Create a resolver instance
+    resolver = dns.asyncresolver.Resolver()  # Create an async resolver instance
     resolver.timeout = 5  # Set timeout to 5 seconds
 
     # Use asyncio.gather to run the checks concurrently
@@ -106,10 +109,21 @@ def is_valid_domain(domain):
         bool: True if the string is a valid domain, False otherwise.
     """
     try:
-        # A very basic check; can be improved with more robust regex
-        if "." not in domain:
+        if "." not in domain or len(domain) > 253:
             return False
         domain.encode("idna")  # Check for IDNA compatibility
+        labels = domain.split(".")
+        if len(labels) < 2:
+            return False
+        if all(label.isdigit() for label in labels):
+            return False
+        for label in labels:
+            if not 1 <= len(label) <= 63:
+                return False
+            if label.startswith("-") or label.endswith("-"):
+                return False
+            if not re.fullmatch(r'[A-Za-z0-9-]+', label):
+                return False
         return True
     except UnicodeError:
         return False
@@ -130,7 +144,9 @@ def is_valid_ip(ip):
         if len(parts) != 4:
             return False
         for part in parts:
-            if not part.isdigit():
+            if not part.isdigit() or part == "":
+                return False
+            if len(part) > 1 and part.startswith("0"):
                 return False
             num = int(part)
             if num < 0 or num > 255:
@@ -181,35 +197,53 @@ def main():
         logging.getLogger().setLevel(logging.DEBUG)
         logging.debug("Verbose logging enabled.")
 
+    original_target = None
     target = None
     if args.domain:
         if not is_valid_domain(args.domain):
             logging.error("Invalid domain name provided.")
             sys.exit(1)
+        original_target = args.domain
         target = args.domain
     elif args.ip:
         if not is_valid_ip(args.ip):
             logging.error("Invalid IP address provided.")
             sys.exit(1)
-        # Reverse the IP address for DNSBL queries
+        original_target = args.ip
+        # Reverse the IP address for DNSBL queries. The reversed form is
+        # the query form only and appears only in verbose logs.
         parts = args.ip.split(".")
         target = ".".join(reversed(parts))
-    
+        if args.verbose:
+            logging.debug(f"Reversed query form for {original_target}: {target}")
+
     dnsbl_servers = args.list
 
     try:
         # Run the checks asynchronously
         results = asyncio.run(check_target_parallel(target, dnsbl_servers))
 
-        print(f"DNSBL check results for: {target}")
+        print(f"DNSBL check results for: {original_target}")
+        listed_count = 0
+        not_listed_count = 0
+        unknown_count = 0
         for server, listed in results.items():
             if listed is True:
+                listed_count += 1
                 print(f"  {server}: LISTED")
             elif listed is False:
+                not_listed_count += 1
                 print(f"  {server}: NOT LISTED")
             else:
+                unknown_count += 1
                 print(f"  {server}: UNKNOWN (Error or Timeout)")
+        print(f"Summary: {listed_count} listed, {not_listed_count} not listed, {unknown_count} unknown.")
+        if listed_count + not_listed_count == 0:
+            logging.error("No DNSBL server produced a definitive answer.")
+            sys.exit(1)
 
+    except SystemExit:
+        raise
     except Exception as e:
         logging.error(f"An unexpected error occurred: {e}", exc_info=True)
         sys.exit(1)

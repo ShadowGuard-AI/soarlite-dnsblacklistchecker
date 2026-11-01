@@ -12,5 +12,9 @@ A command-line tool that checks a given domain or IP address against multiple DN
 - `-l`: No description provided
 - `-v`: No description provided
 
+## Behaviour notes
+
+Checks use the async dnspython resolver (`dns.asyncresolver`, from the `dnspython` package). The result header prints the IP or domain exactly as given; the reversed IP form is the query form and appears only in verbose logs. The run prints a summary count of listed, not listed, and unknown results, and exits with status 1 when no server produced a definitive answer. Domains are validated label by label, and IP octets with leading zeros are rejected.
+
 ## License
 Copyright (c) ShadowGuardAI
